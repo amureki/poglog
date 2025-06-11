@@ -1,75 +1,115 @@
+use colored::*;
+use serde_json::Value;
 use std::io::{self, BufRead};
 use regex::Regex;
-use colored::*;
 use sqlformat::{format, FormatOptions, QueryParams};
 use syntect::easy::HighlightLines;
-use syntect::highlighting::ThemeSet;
+use syntect::highlighting::{ThemeSet, Style};
 use syntect::parsing::SyntaxSet;
-use syntect::util::as_24_bit_terminal_escaped;
-
-// Extract colorization logic into a function
-fn colorize_line(line: &str, timestamp_re: &Regex, level_re: &Regex, duration_re: &Regex) -> String {
-    let line = timestamp_re.replace(line, |caps: &regex::Captures| caps[1].cyan().to_string()).to_string();
-    let line = level_re.replace(&line, |caps: &regex::Captures| caps[0].yellow().to_string()).to_string();
-    let line = duration_re.replace(&line, |caps: &regex::Captures| caps[1].green().to_string()).to_string();
-    line
-}
+use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
 fn main() {
     let stdin = io::stdin();
-    let timestamp_re = Regex::new(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ [A-Z]+ \[\d+\])").unwrap();
-    let level_re = Regex::new(r"\b(LOG|ERROR|WARNING|FATAL|PANIC|INFO|DEBUG):").unwrap();
-    let duration_re = Regex::new(r"(duration: [0-9.]+ ms)").unwrap();
-    let statement_re = Regex::new(r"(statement: )(.*)").unwrap();
-
-    // Setup syntect for SQL highlighting
-    let ps = SyntaxSet::load_defaults_newlines();
-    let ts = ThemeSet::load_defaults();
-    // Handle missing theme gracefully
-    let theme = ts.themes.get("base16-ocean.dark");
-    if theme.is_none() {
-        eprintln!("Warning: Theme 'base16-ocean.dark' not found. SQL highlighting will be skipped.");
-    }
-    let syntax = ps.find_syntax_by_extension("sql").unwrap();
-
     for line in stdin.lock().lines() {
         match line {
             Ok(line) => {
-                // Colorize timestamp, log level, and duration
-                let colored_line = colorize_line(&line, &timestamp_re, &level_re, &duration_re);
-
-                // Highlight and format SQL statements
-                if let Some(caps) = statement_re.captures(&colored_line) {
-                    let prefix = &caps[1];
-                    let sql = &caps[2];
-                    let sql_formatted = format(sql, &QueryParams::None, FormatOptions::default());
-                    if let Some(theme) = theme {
-                        let mut h = HighlightLines::new(syntax, theme);
-                        let ranges = h.highlight(&sql_formatted, &ps);
-                        let sql_highlighted = as_24_bit_terminal_escaped(&ranges[..], false);
-                        // Indent SQL output for clarity
-                        let indented_sql = sql_highlighted
-                            .lines()
-                            .map(|l| format!("    {}", l))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        println!("{}\n{}", prefix, indented_sql);
-                    } else {
-                        // If theme is missing, just print formatted SQL indented
-                        let indented_sql = sql_formatted
-                            .lines()
-                            .map(|l| format!("    {}", l))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        println!("{}\n{}", prefix, indented_sql);
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(json) => {
+                        print_log_entry(&json);
                     }
-                } else {
-                    println!("{}", colored_line);
+                    Err(_) => {
+                        eprintln!("{} {}", "[INVALID JSON]".red().bold(), line);
+                    }
                 }
             }
             Err(e) => {
-                eprintln!("Error reading line: {}", e);
+                eprintln!("{} {}", "[READ ERROR]".red().bold(), e);
             }
+        }
+    }
+}
+
+fn print_log_entry(json: &Value) {
+    let ts = json.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+    let level = json.get("error_severity").and_then(|v| v.as_str()).unwrap_or("");
+    let msg = json.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    let pid = json.get("pid").map(|v| v.to_string()).unwrap_or_else(|| "".to_string());
+    let user = json.get("user").and_then(|v| v.as_str()).unwrap_or("");
+    let db = json.get("dbname").and_then(|v| v.as_str()).unwrap_or("");
+
+    let level_colored = match level {
+        "ERROR" => level.red().bold(),
+        "WARNING" => level.yellow().bold(),
+        "LOG" | "INFO" => level.green(),
+        "FATAL" | "PANIC" => level.on_red().white().bold(),
+        _ => level.normal(),
+    };
+
+    // Build header with only non-empty fields (no backend_type)
+    let mut header = format!("{} {} pid={}", ts.dimmed(), level_colored, pid.cyan());
+    if !user.is_empty() {
+        header.push_str(&format!(" user={}", user.blue()));
+    }
+    if !db.is_empty() {
+        header.push_str(&format!(" db={}", db.magenta()));
+    }
+
+    // Regex for SQL statement
+    let re_sql = Regex::new(r"duration: ([0-9.]+ ms)\s+statement: (.*)").unwrap();
+    let (duration, statement) = if let Some(caps) = re_sql.captures(msg) {
+        (caps.get(1).map(|m| m.as_str()).unwrap_or(""), caps.get(2).map(|m| m.as_str()).unwrap_or(""))
+    } else {
+        ("", "")
+    };
+
+    // Colorize duration
+    let duration_colored = if !duration.is_empty() {
+        format!("duration: {}", duration).yellow().bold().to_string()
+    } else {
+        String::new()
+    };
+
+    // Print header and duration
+    if !duration_colored.is_empty() {
+        println!("{} {}", header, duration_colored);
+    } else {
+        println!("{}", header);
+    }
+
+    // If SQL statement, pretty-print and highlight
+    if !statement.is_empty() {
+        let formatted_sql = format(
+            statement,
+            &QueryParams::None,
+            FormatOptions::default(),
+        );
+        let syntax_set = SyntaxSet::load_defaults_newlines();
+        let theme_set = ThemeSet::load_defaults();
+        let syntax = syntax_set.find_syntax_by_extension("sql").unwrap();
+        let mut h = HighlightLines::new(syntax, &theme_set.themes["base16-ocean.dark"]);
+        let highlighted_sql = LinesWithEndings::from(&formatted_sql)
+            .map(|line| {
+                let ranges: Vec<(Style, &str)> = h.highlight_line(line, &syntax_set).unwrap();
+                as_24_bit_terminal_escaped(&ranges, false)
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        println!("    {}", highlighted_sql.replace("\n", "\n    "));
+    } else {
+        // Otherwise, print message as indented, colorized plain text
+        // Highlight some keywords
+        let keywords = [
+            ("checkpoint", "checkpoint".bold().cyan().to_string()),
+            ("complete", "complete".bold().green().to_string()),
+            ("starting", "starting".bold().yellow().to_string()),
+            ("autovacuum", "autovacuum".bold().magenta().to_string()),
+        ];
+        let mut colored_msg = msg.to_string();
+        for (kw, colored_kw) in &keywords {
+            colored_msg = colored_msg.replace(kw, colored_kw);
+        }
+        for line in colored_msg.lines() {
+            println!("    {}", line);
         }
     }
 }
