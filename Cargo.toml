@@ -1,0 +1,12 @@
+[package]
+name = "poglog"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+regex = "1"
+colored = "2"
+sqlformat = "0.2"
+syntect = "5"
