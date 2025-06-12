@@ -54,10 +54,15 @@ fn print_log_entry(json: &Value) {
         header.push_str(&format!(" db={}", db.magenta()));
     }
 
-    // Regex for SQL statement
+    // Regex for SQL statement with duration
     let re_sql = Regex::new(r"duration: ([0-9.]+ ms)\s+statement: (.*)").unwrap();
+    // Regex for SQL statement without duration
+    let re_statement = Regex::new(r"statement: (.*)").unwrap();
+
     let (duration, statement) = if let Some(caps) = re_sql.captures(msg) {
         (caps.get(1).map(|m| m.as_str()).unwrap_or(""), caps.get(2).map(|m| m.as_str()).unwrap_or(""))
+    } else if let Some(caps) = re_statement.captures(msg) {
+        ("", caps.get(1).map(|m| m.as_str()).unwrap_or(""))
     } else {
         ("", "")
     };
